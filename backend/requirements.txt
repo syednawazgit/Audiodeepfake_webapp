@@ -4,6 +4,7 @@ torch
 torchvision
 torchaudio
 soundfile
+imageio-ffmpeg
 numpy
 python-multipart
 python-dotenv
