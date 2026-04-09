@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 
 import numpy as np
@@ -14,36 +13,14 @@ from spafe.features.lfcc import lfcc as spafe_lfcc
 
 logger = logging.getLogger(__name__)
 
-TARGET_SR = 16000
 MIN_DURATION_SEC = 1.0
 
-# Default T>1 softens overconfident logits (honest display scores). Override via env or fit_temperature.py.
-_DEFAULT_CALIBRATION_TEMPERATURE = 2.0
-_DEFAULT_CONFIDENCE_CAP_PERCENT = 95.0
 
-
-def _calibration_temperature() -> float:
-    t = float(os.environ.get("CALIBRATION_TEMPERATURE", str(_DEFAULT_CALIBRATION_TEMPERATURE)))
-    return t if t > 0 else _DEFAULT_CALIBRATION_TEMPERATURE
-
-
-def _confidence_cap_percent() -> float:
-    c = float(os.environ.get("CONFIDENCE_CAP_PERCENT", str(_DEFAULT_CONFIDENCE_CAP_PERCENT)))
-    return min(max(c, 1.0), 100.0)
-
-
-def _resample_mono_to_16k(waveform: np.ndarray, orig_sr: int) -> np.ndarray:
-    """waveform: 1D float mono."""
-    if orig_sr == TARGET_SR:
-        return waveform.astype(np.float32, copy=False)
-    w = torch.from_numpy(waveform.astype(np.float32)).unsqueeze(0)
-    w = torchaudio.functional.resample(w, orig_sr, TARGET_SR)
-    return w.squeeze(0).numpy().astype(np.float32)
-
-
-def load_audio_from_path(file_path: str | Path) -> np.ndarray:
+def load_audio_from_path(file_path: str | Path) -> tuple[np.ndarray, int]:
     """
-    Load mono float32 waveform at 16 kHz.
+    Load mono float32 waveform and its sample rate (native; no resampling).
+    Same idea as standalone `sf.read` + mono: LFCC must use this `sr` in `lfcc(..., fs=sr)`.
+
     Prefer soundfile; for .webm or if soundfile fails, use torchaudio.load.
     """
     path = Path(file_path)
@@ -83,26 +60,29 @@ def load_audio_from_path(file_path: str | Path) -> np.ndarray:
     if audio.ndim > 1:
         audio = np.mean(audio, axis=1).astype(np.float32)
 
-    audio = _resample_mono_to_16k(audio, sr)
-    duration = len(audio) / TARGET_SR
+    sr_i = int(sr)
+    duration = len(audio) / float(sr_i)
     if duration < MIN_DURATION_SEC:
         raise ValueError(
             f"Audio too short: need at least {MIN_DURATION_SEC} second(s), got {duration:.2f}s"
         )
-    return audio
+    return audio, sr_i
 
 
-def extract_lfcc_spafe(audio_waveform: np.ndarray, sample_rate: int = TARGET_SR) -> torch.Tensor:
+def features_from_waveform(audio_waveform: np.ndarray, sample_rate: int) -> torch.Tensor:
     """
-    LFCC via spafe (matches typical ASVspoof / spafe training pipelines).
-    Returns tensor shape (1, 1, num_ceps, time_frames) for FusionModel.
+    Same LFCC call chain as standalone single-file eval: mono waveform → spafe → (n_ceps, T) → batch.
     """
     x = np.asarray(audio_waveform, dtype=np.float32).squeeze()
     if x.ndim != 1:
         x = x.reshape(-1)
 
+    # Match eval script: torch tensor in/out so behavior matches `wav.squeeze().numpy()` path.
+    w = torch.from_numpy(x).unsqueeze(0)
+    wav = w.squeeze().numpy()
+
     features = spafe_lfcc(
-        x,
+        wav,
         fs=sample_rate,
         num_ceps=20,
         nfilts=40,
@@ -110,60 +90,33 @@ def extract_lfcc_spafe(audio_waveform: np.ndarray, sample_rate: int = TARGET_SR)
         low_freq=0,
         high_freq=sample_rate // 2,
     )
-    # spafe: (time_frames, num_ceps) -> model expects (batch, 1, ceps, time)
-    lfcc_tensor = torch.from_numpy(np.asarray(features, dtype=np.float32)).T.unsqueeze(0).unsqueeze(0)
-    return lfcc_tensor
+    # (time_frames, n_ceps) -> (1, n_ceps, time_frames); torch.tensor like training/eval scripts
+    feat = torch.tensor(np.asarray(features, dtype=np.float32), dtype=torch.float32).T.unsqueeze(0)
+    return feat
 
 
 def run_inference(
-    waveform_16k_mono: np.ndarray,
+    waveform_mono: np.ndarray,
+    sample_rate: int,
     *,
     model: torch.nn.Module,
-    wav2vec_model: torch.nn.Module,
-    processor,
     device: torch.device,
 ) -> dict:
     """
-    waveform_16k_mono: 1D float32 numpy, sample rate 16 kHz, length >= 1s.
-    Model returns logits; we apply sigmoid for raw prob, sigmoid(logit/T) for display score.
-    Returns dict with score, prediction, confidence (no processing_time_ms).
+    waveform_mono: 1D float32 numpy; sample_rate must match how the file was decoded (native rate).
+    Returns model P(spoof) as `score` and label confidence (%) for the predicted class, uncapped.
     """
-    inputs = processor(
-        waveform_16k_mono,
-        sampling_rate=TARGET_SR,
-        return_tensors="pt",
-        padding=True,
-    )
-    inputs = {k: v.to(device) for k, v in inputs.items()}
-
-    T = _calibration_temperature()
-    cap_pct = _confidence_cap_percent()
+    feat = features_from_waveform(waveform_mono, sample_rate).to(device)
 
     with torch.no_grad():
-        w2v_out = wav2vec_model(**inputs)
-        wav2vec_feat = w2v_out.last_hidden_state.mean(dim=1)
-
-        lfcc_tensor = extract_lfcc_spafe(waveform_16k_mono).to(device)
-        logit_t = model(lfcc_tensor, wav2vec_feat)
-        logit = float(logit_t.item())
-        prob_raw = float(torch.sigmoid(logit_t).item())
-        prob = float(torch.sigmoid(logit_t / T).item())
+        prob_t = model(feat).squeeze()
+        prob = float(prob_t.item())
 
     prediction = "Fake" if prob > 0.5 else "Real"
-    conf_uncapped = float(prob * 100) if prediction == "Fake" else float((1.0 - prob) * 100)
-    confidence = min(conf_uncapped, cap_pct)
+    confidence = float(prob * 100.0) if prediction == "Fake" else float((1.0 - prob) * 100.0)
 
     return {
         "prediction": prediction,
-        "confidence": round(confidence, 2),
+        "confidence": confidence,
         "score": prob,
-        "logit": logit,
-        "score_raw": prob_raw,
-        "calibration_temperature": T,
-        "confidence_cap_percent": cap_pct,
-        "probability_note": (
-            "Scores use temperature scaling (default T=2) so they are less extreme than raw "
-            "model output; confidence is capped. Fit T on validation data with "
-            "backend/fit_temperature.py for better calibration."
-        ),
     }

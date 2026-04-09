@@ -317,6 +317,14 @@
 
 .chart-wrap {
   flex-shrink: 0;
+  width: 100%;
+  max-width: 420px;
+}
+
+.confidence-chart {
+  width: 100%;
+  max-width: 400px;
+  margin: 0 auto;
 }
 
 .score-bars {

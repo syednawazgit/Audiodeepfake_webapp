@@ -2,11 +2,8 @@ import torch
 import torch.nn as nn
 
 
-class FusionModel(nn.Module):
-    """
-    Matches `best_wav2vec_lfcc_model.pth` and testaudio.py FusionModel:
-    LFCC CNN with MaxPool after conv1/2, GAP, concat Wav2Vec2 (768) → 256 → 1.
-    """
+class AudioBinaryClassifier(nn.Module):
+    """Binary classifier; architecture matches the exported `state_dict` from training."""
 
     def __init__(self):
         super().__init__()
@@ -24,13 +21,13 @@ class FusionModel(nn.Module):
 
         self.gap = nn.AdaptiveAvgPool2d((1, 1))
 
-        self.fc1 = nn.Linear(128 + 768, 256)
+        self.fc1 = nn.Linear(128, 128)
         self.dropout = nn.Dropout(0.5)
-        self.fc2 = nn.Linear(256, 1)
+        self.fc2 = nn.Linear(128, 1)
 
-    def forward(self, lfcc, wav2vec):
-        # testaudio passes (B, 20, T); inference passes (B, 1, 20, T)
-        x = lfcc.unsqueeze(1) if lfcc.dim() == 3 else lfcc
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, n_ceps, time)
+        x = x.unsqueeze(1)
 
         x = self.pool1(torch.relu(self.bn1(self.conv1(x))))
         x = self.pool2(torch.relu(self.bn2(self.conv2(x))))
@@ -39,10 +36,5 @@ class FusionModel(nn.Module):
         x = self.gap(x)
         x = x.view(x.size(0), -1)
 
-        fused = torch.cat([x, wav2vec], dim=1)
-        x = self.dropout(torch.relu(self.fc1(fused)))
-        return self.fc2(x)
-
-
-# Backward-compatible name for imports
-FusionResNet = FusionModel
+        x = self.dropout(torch.relu(self.fc1(x)))
+        return torch.sigmoid(self.fc2(x))

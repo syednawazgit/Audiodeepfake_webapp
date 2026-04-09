@@ -11,17 +11,16 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from transformers import Wav2Vec2Model, Wav2Vec2Processor
 
 from inference import load_audio_from_path, run_inference
-from model import FusionResNet
+from model import AudioBinaryClassifier
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 BACKEND_DIR = Path(__file__).resolve().parent
 load_dotenv(BACKEND_DIR / ".env")
-_model_env = os.environ.get("MODEL_PATH", "../trained_models/best_wav2vec_lfcc_model.pth")
+_model_env = os.environ.get("MODEL_PATH", "../trained_models/best_lfcc_model.pth")
 MODEL_PATH = Path(_model_env)
 if not MODEL_PATH.is_absolute():
     MODEL_PATH = (BACKEND_DIR / MODEL_PATH).resolve()
@@ -31,7 +30,7 @@ BASE64_ALLOWED = {".wav", ".mp3", ".flac", ".ogg", ".webm"}
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-model = FusionResNet()
+model = AudioBinaryClassifier()
 try:
     state = torch.load(str(MODEL_PATH), map_location=device, weights_only=False)
 except TypeError:
@@ -39,11 +38,6 @@ except TypeError:
 model.load_state_dict(state)
 model.to(device)
 model.eval()
-
-processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base")
-wav2vec_model = Wav2Vec2Model.from_pretrained("facebook/wav2vec2-base")
-wav2vec_model.to(device)
-wav2vec_model.eval()
 
 app = FastAPI(title="Audio Deepfake Detection API")
 
@@ -70,14 +64,8 @@ def _suffix_from_upload(filename: str | None) -> str:
 def _predict_from_file_path(path: Path) -> dict:
     t0 = time.perf_counter()
     try:
-        waveform = load_audio_from_path(path)
-        out = run_inference(
-            waveform,
-            model=model,
-            wav2vec_model=wav2vec_model,
-            processor=processor,
-            device=device,
-        )
+        waveform, sr = load_audio_from_path(path)
+        out = run_inference(waveform, sr, model=model, device=device)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
@@ -97,7 +85,6 @@ def health():
         "cuda_available": cuda,
         "model_loaded": True,
         "model_path": MODEL_PATH.name,
-        "wav2vec_loaded": True,
     }
 
 

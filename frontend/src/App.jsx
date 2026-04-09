@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useDropzone } from 'react-dropzone'
 import { FiMic, FiUploadCloud } from 'react-icons/fi'
 import { analyzeRecording, uploadAudio } from './api'
+import ConfidenceChart from './ConfidenceChart'
 import './App.css'
 
 const ACCEPT = { 'audio/wav': ['.wav'], 'audio/mpeg': ['.mp3'], 'audio/flac': ['.flac'], 'audio/ogg': ['.ogg'] }
@@ -169,6 +170,10 @@ export default function App() {
   }
 
   const isFake = result?.prediction === 'Fake'
+  const pFake = typeof result?.score === 'number' ? result.score : 0
+  const pctReal = (1 - pFake) * 100
+  const pctFake = pFake * 100
+  const conf = typeof result?.confidence === 'number' ? result.confidence : isFake ? pctFake : pctReal
 
   return (
     <div className="app">
@@ -190,8 +195,8 @@ export default function App() {
           Audio <span className="accent">Deepfake</span> Detector
         </h1>
         <p>
-          Two-stream fusion model trained on <strong>ASVspoof 2019</strong> LA (LFCC CNN + Wav2Vec2-base).
-          Upload or record audio for a <strong>spoof</strong> vs <strong>bonafide</strong> label.
+          Classifier trained on <strong>ASVspoof 2019</strong> LA. Upload or record audio for a{' '}
+          <strong>spoof</strong> vs <strong>bonafide</strong> label.
         </p>
       </header>
 
@@ -243,11 +248,23 @@ export default function App() {
 
       {result && (
         <section className="results">
-          <div className="results-inner results-inner--verdict-only">
+          <div className="results-inner">
             <div className={`verdict ${isFake ? 'fake' : 'real'}`}>
               {isFake ? 'Spoof / Fake' : 'Bonafide / Real'}
             </div>
-            <p className="meta-small">Processing time: {result.processing_time_ms} ms</p>
+            <div className="chart-wrap">
+              <p className="meta-small" style={{ marginBottom: '0.35rem' }}>
+                Probability split from model output (Bonafide vs Spoof)
+              </p>
+              <ConfidenceChart
+                pctReal={pctReal}
+                pctFake={pctFake}
+                centerConfidence={`${conf.toFixed(2)}%`}
+              />
+            </div>
+            <p className="meta-small" style={{ width: '100%', textAlign: 'center' }}>
+              P(spoof): {(pFake * 100).toFixed(4)}% · Processing time: {result.processing_time_ms} ms
+            </p>
           </div>
           <p className="disclaimer">Model trained on ASVspoof 2019 LA dataset. This label is an estimate, not legal proof.</p>
           <div className="reset-row">

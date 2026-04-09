@@ -8,18 +8,10 @@ from inference import run_inference
 
 def main_smoke() -> None:
     wave = np.zeros(3 * 16000, dtype=np.float32)
-    out = run_inference(
-        wave,
-        model=main.model,
-        wav2vec_model=main.wav2vec_model,
-        processor=main.processor,
-        device=main.device,
-    )
+    out = run_inference(wave, 16000, model=main.model, device=main.device)
     print("prediction:", out["prediction"])
-    print("score (calibrated P fake):", out["score"])
-    print("score_raw (uncalibrated):", out.get("score_raw"))
-    print("logit:", out.get("logit"))
-    print("confidence:", out["confidence"])
+    print("score (P spoof):", out["score"])
+    print("confidence (% for predicted class):", out["confidence"])
 
 
 if __name__ == "__main__":

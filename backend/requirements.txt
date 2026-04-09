@@ -3,7 +3,6 @@ uvicorn
 torch
 torchvision
 torchaudio
-transformers
 soundfile
 numpy
 python-multipart
