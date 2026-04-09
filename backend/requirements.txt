@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+torch
+torchvision
+torchaudio
+transformers
+soundfile
+numpy
+python-multipart
+python-dotenv
+spafe
